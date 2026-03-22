@@ -1,0 +1,5 @@
+{
+  "name": "Commuter Hero",
+  "description": "A GIS-powered commute optimizer with address autofill, bus route simulations, and unconventional pathfinding (random/longest routes).",
+  "requestFramePermissions": ["geolocation"]
+}
