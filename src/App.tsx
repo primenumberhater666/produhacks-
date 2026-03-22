@@ -1,705 +1,1007 @@
-import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
-import 'leaflet/dist/leaflet.css';
+import { useEffect, useRef, useState } from 'react';
+import type { FormEvent } from 'react';
+import { MapContainer, Marker, Popup, Polyline, TileLayer, useMap } from 'react-leaflet';
+import type { LatLngExpression } from 'leaflet';
 import L from 'leaflet';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Search, MapPin, Navigation, Clock, Route as RouteIcon, AlertCircle, Briefcase, Home, Car, Bike, Footprints, Bus, Shuffle, Maximize, ChevronDown, X, Star } from 'lucide-react';
+import 'leaflet/dist/leaflet.css';
+import {
+  AlertCircle,
+  Bike,
+  Briefcase,
+  Bus,
+  Car,
+  Clock3,
+  Footprints,
+  Home,
+  Navigation,
+  Route as RouteIcon,
+  Shuffle,
+  Trophy,
+  WandSparkles,
+} from 'lucide-react';
 
-// --- Types ---
-interface Suggestion {
+type Coordinates = [number, number];
+type CommuteMode = 'driving' | 'walking' | 'cycling' | 'bus';
+type RoutePlan = 'optimal' | 'random' | 'longest';
+
+type Suggestion = {
+  place_id: number;
   display_name: string;
   lat: string;
   lon: string;
-  place_id: number;
-}
-
-interface TransitLeg {
-  type: 'bus' | 'walk';
-  line?: string;
-  instruction: string;
-  duration: number;
-  stopName?: string;
-}
-
-interface TransitOption {
-  id: string;
-  name: string;
-  duration: number;
-  distance: number;
-  transfers: number;
-  stops: number;
-  description: string;
-  route: [number, number][];
-  legs: TransitLeg[];
-  destinationName: string;
-  destinationCoords: [number, number];
-}
-
-// Custom icons for Home and Work
-const createCustomIcon = (color: string, iconHtml: string) => {
-  return L.divIcon({
-    className: 'custom-icon',
-    html: `<div style="background-color: ${color}; width: 32px; height: 32px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 5px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; color: white;">${iconHtml}</div>`,
-    iconSize: [32, 32],
-    iconAnchor: [16, 16]
-  });
 };
 
-const homeIcon = createCustomIcon('#3b82f6', '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>'); // blue-500
-const workIcon = createCustomIcon('#ef4444', '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="7" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>'); // red-500
+type OsrmGeometry = {
+  coordinates: [number, number][];
+};
 
-// Map bounds updater component
-function MapUpdater({ homeCoords, workCoords, route }: { homeCoords: [number, number] | null, workCoords: [number, number] | null, route: [number, number][] | null }) {
+type OsrmRoute = {
+  distance: number;
+  duration: number;
+  geometry: OsrmGeometry;
+};
+
+type OsrmResponse = {
+  code: string;
+  routes: OsrmRoute[];
+};
+
+type RouteResult = {
+  distance: number;
+  duration: number;
+  geometry: Coordinates[];
+  label: string;
+};
+
+type TransitLeg = {
+  type: 'walk' | 'bus';
+  title: string;
+  detail: string;
+  duration: number;
+};
+
+type BusOption = {
+  id: string;
+  name: string;
+  description: string;
+  transfers: number;
+  stops: number;
+  distance: number;
+  duration: number;
+  geometry: Coordinates[];
+  legs: TransitLeg[];
+  recommended: boolean;
+};
+
+const DEFAULT_CENTER: Coordinates = [37.7749, -122.4194];
+
+const createPin = (background: string, icon: string) =>
+  L.divIcon({
+    className: 'commuter-hero-pin',
+    html: `<div style="width:36px;height:36px;border-radius:999px;background:${background};border:3px solid #ffffff;box-shadow:0 12px 30px rgba(15,23,42,0.18);display:flex;align-items:center;justify-content:center;color:#ffffff;">${icon}</div>`,
+    iconSize: [36, 36],
+    iconAnchor: [18, 18],
+  });
+
+const homeIcon = createPin(
+  '#2563eb',
+  '<svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7"></path><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-7h4v7h4a1 1 0 0 0 1-1V9.5"></path></svg>',
+);
+
+const workIcon = createPin(
+  '#dc2626',
+  '<svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="7" rx="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>',
+);
+
+function MapViewport({
+  route,
+  homeCoords,
+  workCoords,
+}: {
+  route: Coordinates[];
+  homeCoords: Coordinates | null;
+  workCoords: Coordinates | null;
+}) {
   const map = useMap();
-  
+
   useEffect(() => {
-    if (route && route.length > 0) {
-      const bounds = L.latLngBounds(route);
-      map.fitBounds(bounds, { padding: [50, 50] });
-    } else if (homeCoords && workCoords) {
-      const bounds = L.latLngBounds([homeCoords, workCoords]);
-      map.fitBounds(bounds, { padding: [50, 50] });
-    } else if (homeCoords) {
-      map.setView(homeCoords, 13);
-    } else if (workCoords) {
-      map.setView(workCoords, 13);
+    const points: LatLngExpression[] =
+      route.length > 0
+        ? route
+        : [homeCoords, workCoords].filter(Boolean) as Coordinates[];
+
+    if (points.length === 0) {
+      map.setView(DEFAULT_CENTER, 12);
+      return;
     }
-  }, [homeCoords, workCoords, route, map]);
-  
+
+    if (points.length === 1) {
+      map.setView(points[0], 13);
+      return;
+    }
+
+    map.fitBounds(L.latLngBounds(points), { padding: [36, 36] });
+  }, [homeCoords, map, route, workCoords]);
+
   return null;
+}
+
+function RouletteWheel({ active }: { active: boolean }) {
+  const [rotation, setRotation] = useState(0);
+
+  useEffect(() => {
+    if (!active) {
+      setRotation(0);
+      return;
+    }
+
+    let frameId = 0;
+    let velocity = 30;
+    let currentRotation = 0;
+    let lastTimestamp: number | null = null;
+
+    const tick = (timestamp: number) => {
+      if (lastTimestamp === null) {
+        lastTimestamp = timestamp;
+      }
+
+      const deltaMs = timestamp - lastTimestamp;
+      lastTimestamp = timestamp;
+
+      currentRotation = (currentRotation + velocity * (deltaMs / 16.67)) % 360;
+      setRotation(currentRotation);
+
+      velocity = Math.max(1.5, velocity * 0.988);
+      frameId = window.requestAnimationFrame(tick);
+    };
+
+    frameId = window.requestAnimationFrame(tick);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [active]);
+
+  return (
+    <div className="relative h-72 w-72 sm:h-80 sm:w-80">
+      <div className="absolute left-1/2 top-[-18px] z-20 h-0 w-0 -translate-x-1/2 border-l-[20px] border-r-[20px] border-t-[34px] border-l-transparent border-r-transparent border-t-amber-300 drop-shadow-lg" />
+      <div
+        className="absolute inset-0 rounded-full border-[12px] border-white/20 shadow-[0_0_80px_rgba(15,23,42,0.45)]"
+        style={{ transform: `rotate(${rotation}deg)` }}
+      >
+        <div className="absolute inset-0 rounded-full bg-[conic-gradient(from_0deg,#15803d_0deg_32deg,#111827_32deg_74deg,#b91c1c_74deg_116deg,#111827_116deg_158deg,#b91c1c_158deg_200deg,#111827_200deg_242deg,#b91c1c_242deg_284deg,#111827_284deg_326deg,#b91c1c_326deg_360deg)]" />
+        <div className="absolute inset-[16px] rounded-full border-4 border-white/40" />
+        <div className="absolute inset-[42px] rounded-full bg-slate-950/20" />
+        <div className="absolute left-1/2 top-1/2 h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 border-white bg-slate-900 shadow-lg" />
+        <div className="absolute left-1/2 top-5 h-[calc(50%-2.25rem)] w-1 -translate-x-1/2 rounded-full bg-white/85" />
+        <div className="absolute bottom-5 left-1/2 h-[calc(50%-2.25rem)] w-1 -translate-x-1/2 rounded-full bg-white/85" />
+        <div className="absolute left-5 top-1/2 h-1 w-[calc(50%-2.25rem)] -translate-y-1/2 rounded-full bg-white/85" />
+        <div className="absolute right-5 top-1/2 h-1 w-[calc(50%-2.25rem)] -translate-y-1/2 rounded-full bg-white/85" />
+      </div>
+    </div>
+  );
+}
+
+function formatDuration(seconds: number) {
+  const totalMinutes = Math.max(1, Math.round(seconds / 60));
+
+  if (totalMinutes < 60) {
+    return `${totalMinutes} min`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours} hr ${minutes} min`;
+}
+
+function formatDistance(meters: number) {
+  const miles = meters * 0.000621371;
+  return `${miles.toFixed(1)} mi`;
+}
+
+function buildNominatimUrl(query: string, limit: number) {
+  const url = new URL('https://nominatim.openstreetmap.org/search');
+  url.searchParams.set('q', query);
+  url.searchParams.set('format', 'jsonv2');
+  url.searchParams.set('addressdetails', '1');
+  url.searchParams.set('limit', String(limit));
+  return url.toString();
+}
+
+async function fetchSuggestions(query: string) {
+  const response = await fetch(buildNominatimUrl(query, 5), {
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error('Address suggestions are unavailable right now.');
+  }
+
+  return (await response.json()) as Suggestion[];
+}
+
+async function geocodeAddress(address: string) {
+  const response = await fetch(buildNominatimUrl(address, 1), {
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error('Unable to geocode address.');
+  }
+
+  const results = (await response.json()) as Suggestion[];
+  if (!results.length) {
+    return null;
+  }
+
+  return {
+    coords: [Number(results[0].lat), Number(results[0].lon)] as Coordinates,
+    label: results[0].display_name,
+  };
+}
+
+function toGeometry(route: OsrmRoute) {
+  return route.geometry.coordinates.map(([lng, lat]) => [lat, lng] as Coordinates);
+}
+
+async function requestOsrmRoute(
+  profile: 'driving' | 'foot' | 'bike',
+  points: Coordinates[],
+  alternatives = false,
+) {
+  const coords = points.map(([lat, lon]) => `${lon},${lat}`).join(';');
+  const url = new URL(`https://router.project-osrm.org/route/v1/${profile}/${coords}`);
+  url.searchParams.set('overview', 'full');
+  url.searchParams.set('geometries', 'geojson');
+  if (alternatives) {
+    url.searchParams.set('alternatives', 'true');
+  }
+
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new Error('Routing service is unavailable.');
+  }
+
+  const data = (await response.json()) as OsrmResponse;
+  if (data.code !== 'Ok' || !data.routes.length) {
+    throw new Error('No route found for the selected commute.');
+  }
+
+  return data.routes;
+}
+
+function offsetPoint(start: Coordinates, end: Coordinates, ratio: number, offsetScale: number) {
+  const lat = start[0] + (end[0] - start[0]) * ratio;
+  const lon = start[1] + (end[1] - start[1]) * ratio;
+  const latDiff = end[0] - start[0];
+  const lonDiff = end[1] - start[1];
+  const length = Math.max(Math.sqrt(latDiff * latDiff + lonDiff * lonDiff), 0.01);
+  const normalLat = -lonDiff / length;
+  const normalLon = latDiff / length;
+
+  return [lat + normalLat * offsetScale, lon + normalLon * offsetScale] as Coordinates;
+}
+
+function scoreRecommendedBus(option: BusOption) {
+  return option.duration - option.transfers * 240 - option.stops * 18;
+}
+
+function buildBusLegs(optionName: string, transfers: number, duration: number) {
+  const walkIn = Math.min(8 * 60, Math.max(4 * 60, duration * 0.08));
+  const transferWalk = transfers > 0 ? Math.round(duration * 0.05) : 0;
+  const finalWalk = Math.min(7 * 60, Math.max(3 * 60, duration * 0.06));
+  const busSegments = transfers + 1;
+  const busTime = Math.max(duration - walkIn - transferWalk * transfers - finalWalk, 8 * 60);
+  const perSegment = Math.round(busTime / busSegments);
+  const legs: TransitLeg[] = [
+    {
+      type: 'walk',
+      title: 'Walk to first stop',
+      detail: 'Head to the nearest inbound stop.',
+      duration: walkIn,
+    },
+  ];
+
+  for (let index = 0; index < busSegments; index += 1) {
+    const segmentNumber = index + 1;
+    legs.push({
+      type: 'bus',
+      title: `Ride ${optionName} segment ${segmentNumber}`,
+      detail:
+        index === busSegments - 1
+          ? 'Stay on until the final stop near work.'
+          : 'Ride to the transfer hub and switch lines.',
+      duration: perSegment,
+    });
+
+    if (index < busSegments - 1) {
+      legs.push({
+        type: 'walk',
+        title: `Transfer ${segmentNumber}`,
+        detail: 'Move to the next platform or curbside bay.',
+        duration: transferWalk,
+      });
+    }
+  }
+
+  legs.push({
+    type: 'walk',
+    title: 'Walk to destination',
+    detail: 'Finish the last short walk to work.',
+    duration: finalWalk,
+  });
+
+  return legs;
+}
+
+async function buildStandardRoute(start: Coordinates, end: Coordinates, mode: Exclude<CommuteMode, 'bus'>, plan: RoutePlan) {
+  const profile = mode === 'walking' ? 'foot' : mode === 'cycling' ? 'bike' : 'driving';
+
+  if (plan === 'optimal') {
+    const [best] = await requestOsrmRoute(profile, [start, end], true);
+    return {
+      distance: best.distance,
+      duration: best.duration,
+      geometry: toGeometry(best),
+      label: 'Optimal route',
+    } satisfies RouteResult;
+  }
+
+  const candidatePointSets: Coordinates[][] = [];
+
+  if (plan === 'random') {
+    for (let index = 0; index < 6; index += 1) {
+      const first = offsetPoint(start, end, 0.25 + Math.random() * 0.25, (Math.random() - 0.5) * 0.45);
+      const second = offsetPoint(start, end, 0.6 + Math.random() * 0.2, (Math.random() - 0.5) * 0.55);
+      candidatePointSets.push([start, first, second, end]);
+    }
+  }
+
+  if (plan === 'longest') {
+    candidatePointSets.push(
+      [start, offsetPoint(start, end, 0.35, 0.55), offsetPoint(start, end, 0.72, -0.65), end],
+      [start, offsetPoint(start, end, 0.22, -0.7), offsetPoint(start, end, 0.58, 0.8), end],
+      [start, offsetPoint(start, end, 0.42, 0.95), offsetPoint(start, end, 0.8, 0.55), end],
+    );
+  }
+
+  const settled = await Promise.allSettled(
+    candidatePointSets.map(async (points) => {
+      const [route] = await requestOsrmRoute(profile, points, false);
+      return {
+        distance: route.distance,
+        duration: route.duration,
+        geometry: toGeometry(route),
+        label: plan === 'random' ? 'Randomized route' : 'Longest available detour',
+      } satisfies RouteResult;
+    }),
+  );
+
+  const routes = settled
+    .filter((result): result is PromiseFulfilledResult<RouteResult> => result.status === 'fulfilled')
+    .map((result) => result.value);
+
+  if (!routes.length) {
+    const [fallback] = await requestOsrmRoute(profile, [start, end], true);
+    return {
+      distance: fallback.distance,
+      duration: fallback.duration,
+      geometry: toGeometry(fallback),
+      label: 'Fallback route',
+    } satisfies RouteResult;
+  }
+
+  if (plan === 'random') {
+    return routes[Math.floor(Math.random() * routes.length)];
+  }
+
+  return routes.reduce((longest, current) => (current.distance > longest.distance ? current : longest));
+}
+
+async function buildBusOptions(start: Coordinates, end: Coordinates) {
+  const directPromise = requestOsrmRoute('driving', [start, end], true);
+  const northPromise = requestOsrmRoute('driving', [start, offsetPoint(start, end, 0.42, 0.18), end]);
+  const southPromise = requestOsrmRoute('driving', [start, offsetPoint(start, end, 0.55, -0.2), end]);
+  const crosstownPromise = requestOsrmRoute('driving', [start, offsetPoint(start, end, 0.3, -0.12), offsetPoint(start, end, 0.76, 0.18), end]);
+
+  const results = await Promise.allSettled([directPromise, northPromise, southPromise, crosstownPromise]);
+  const routes = results
+    .filter(
+      (
+        result,
+      ): result is PromiseFulfilledResult<OsrmRoute[]> => result.status === 'fulfilled' && result.value.length > 0,
+    )
+    .map((result) => result.value[0]);
+
+  if (!routes.length) {
+    throw new Error('No bus-style route options could be generated.');
+  }
+
+  const seed = routes[0];
+  const candidateSeeds = [
+    {
+      id: 'express',
+      name: 'Express 101',
+      description: 'Few stops and minimal transfers. Best when you want the straightest transit corridor.',
+      transfers: 0,
+      stops: 7,
+      route: seed,
+      durationMultiplier: 1.18,
+      distanceMultiplier: 1.02,
+    },
+    {
+      id: 'connector',
+      name: 'Connector Blue + Green',
+      description: 'More transfers, but it prioritizes faster corridors and can beat traffic despite extra stops.',
+      transfers: 2,
+      stops: 14,
+      route: routes[1] ?? seed,
+      durationMultiplier: 0.94,
+      distanceMultiplier: 1.08,
+    },
+    {
+      id: 'crosstown',
+      name: 'Crosstown Local',
+      description: 'Broader stop coverage with a mid-route transfer through busy neighborhoods.',
+      transfers: 1,
+      stops: 18,
+      route: routes[2] ?? seed,
+      durationMultiplier: 1.08,
+      distanceMultiplier: 1.12,
+    },
+    {
+      id: 'metro',
+      name: 'Metro Link Stack',
+      description: 'A long transfer-heavy path that leans on multiple bus lanes and dedicated transit segments.',
+      transfers: 3,
+      stops: 21,
+      route: routes[3] ?? routes[1] ?? seed,
+      durationMultiplier: 0.97,
+      distanceMultiplier: 1.16,
+    },
+  ];
+
+  const options = candidateSeeds.map((candidate) => {
+    const distance = candidate.route.distance * candidate.distanceMultiplier;
+    const duration = candidate.route.duration * candidate.durationMultiplier;
+
+    return {
+      id: candidate.id,
+      name: candidate.name,
+      description: candidate.description,
+      transfers: candidate.transfers,
+      stops: candidate.stops,
+      distance,
+      duration,
+      geometry: toGeometry(candidate.route),
+      legs: buildBusLegs(candidate.name, candidate.transfers, duration),
+      recommended: false,
+    } satisfies BusOption;
+  });
+
+  const transferFriendly = options.filter((option) => option.transfers >= 1);
+  const recommendedPool = transferFriendly.length ? transferFriendly : options;
+  const recommended = recommendedPool.reduce((best, current) =>
+    scoreRecommendedBus(current) < scoreRecommendedBus(best) ? current : best,
+  );
+
+  return options.map((option) => ({
+    ...option,
+    recommended: option.id === recommended.id,
+  }));
 }
 
 export default function App() {
   const [homeAddress, setHomeAddress] = useState('');
   const [workAddress, setWorkAddress] = useState('');
-  const [homeCoords, setHomeCoords] = useState<[number, number] | null>(null);
-  const [workCoords, setWorkCoords] = useState<[number, number] | null>(null);
-  const [route, setRoute] = useState<[number, number][] | null>(null);
-  const [distance, setDistance] = useState<number | null>(null);
-  const [duration, setDuration] = useState<number | null>(null);
+  const [homeCoords, setHomeCoords] = useState<Coordinates | null>(null);
+  const [workCoords, setWorkCoords] = useState<Coordinates | null>(null);
+  const [mode, setMode] = useState<CommuteMode>('driving');
+  const [plan, setPlan] = useState<RoutePlan>('optimal');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState('driving');
-  const [routeType, setRouteType] = useState('optimal');
-  
-  // New States
+  const [activeRoute, setActiveRoute] = useState<RouteResult | null>(null);
+  const [busOptions, setBusOptions] = useState<BusOption[]>([]);
+  const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
   const [homeSuggestions, setHomeSuggestions] = useState<Suggestion[]>([]);
   const [workSuggestions, setWorkSuggestions] = useState<Suggestion[]>([]);
   const [showHomeSuggestions, setShowHomeSuggestions] = useState(false);
   const [showWorkSuggestions, setShowWorkSuggestions] = useState(false);
-  const [transitOptions, setTransitOptions] = useState<TransitOption[]>([]);
-  const [selectedTransitId, setSelectedTransitId] = useState<string | null>(null);
-
-  // Default center (San Francisco)
-  const defaultCenter: [number, number] = [37.7749, -122.4194];
-
-  const geocode = async (address: string): Promise<[number, number] | null> => {
-    try {
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`);
-      const data = await response.json();
-      if (data && data.length > 0) {
-        return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
-      }
-      return null;
-    } catch (err) {
-      console.error("Geocoding error:", err);
-      return null;
-    }
-  };
-
-  // --- Autofill Logic ---
-  const fetchSuggestions = async (query: string, type: 'home' | 'work') => {
-    if (query.length < 3) {
-      if (type === 'home') setHomeSuggestions([]);
-      else setWorkSuggestions([]);
-      return;
-    }
-    try {
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
-      const data = await response.json();
-      if (type === 'home') setHomeSuggestions(data);
-      else setWorkSuggestions(data);
-    } catch (err) {
-      console.error("Suggestions error:", err);
-    }
-  };
+  const homeDebounceRef = useRef<number | null>(null);
+  const workDebounceRef = useRef<number | null>(null);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (homeAddress && showHomeSuggestions) fetchSuggestions(homeAddress, 'home');
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [homeAddress]);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (workAddress && showWorkSuggestions) fetchSuggestions(workAddress, 'work');
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [workAddress]);
-
-  // --- Bus Simulation Logic ---
-  const simulateTransitOptions = async (start: [number, number], end: [number, number]): Promise<TransitOption[]> => {
-    // Get base route
-    const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${start[1]},${start[0]};${end[1]},${end[0]}?overview=full&geometries=geojson&alternatives=true`);
-    const data = await response.json();
-    
-    if (data.code !== 'Ok') return [];
-
-    const baseRoute = data.routes[0];
-    const coords = baseRoute.geometry.coordinates.map((c: any) => [c[1], c[0]] as [number, number]);
-
-    // Helper to generate random destination nearby
-    const getNearby = (base: [number, number], offset: number) => [base[0] + (Math.random() - 0.5) * offset, base[1] + (Math.random() - 0.5) * offset] as [number, number];
-
-    return [
-      {
-        id: 'direct',
-        name: 'Express Bus 101',
-        duration: baseRoute.duration * 1.2,
-        distance: baseRoute.distance,
-        transfers: 0,
-        stops: 4,
-        description: 'Fastest direct route with minimal stops.',
-        route: coords,
-        destinationName: 'Downtown Transit Center',
-        destinationCoords: getNearby(end, 0.005),
-        legs: [
-          { type: 'walk', instruction: 'Walk to Main St Station', duration: 300 },
-          { type: 'bus', line: '101 Express', instruction: 'Take Bus 101 to Downtown', duration: baseRoute.duration * 1.1, stopName: 'Downtown Transit Center' }
-        ]
-      },
-      {
-        id: 'multi-transfer',
-        name: 'Local Network (Priority)',
-        duration: baseRoute.duration * 0.9,
-        distance: baseRoute.distance * 1.1,
-        transfers: 2,
-        stops: 12,
-        description: 'More transfers but uses dedicated bus lanes to avoid peak traffic.',
-        route: coords,
-        destinationName: 'Corporate Plaza North',
-        destinationCoords: getNearby(end, 0.008),
-        legs: [
-          { type: 'bus', line: 'Blue Line', instruction: 'Take Blue Line to Central Hub', duration: baseRoute.duration * 0.4, stopName: 'Central Hub' },
-          { type: 'walk', instruction: 'Transfer at Central Hub', duration: 180 },
-          { type: 'bus', line: 'Green Line', instruction: 'Take Green Line to Corporate Plaza', duration: baseRoute.duration * 0.4, stopName: 'Corporate Plaza North' }
-        ]
-      },
-      {
-        id: 'scenic',
-        name: 'Route 42 (Scenic)',
-        duration: baseRoute.duration * 1.5,
-        distance: baseRoute.distance * 1.3,
-        transfers: 1,
-        stops: 8,
-        description: 'Longer route through the residential district.',
-        route: coords,
-        destinationName: 'Eastside Heights',
-        destinationCoords: getNearby(end, 0.01),
-        legs: [
-          { type: 'bus', line: '42 Scenic', instruction: 'Take Bus 42 to Hilltop', duration: baseRoute.duration * 0.8, stopName: 'Hilltop View' },
-          { type: 'bus', line: '15 Local', instruction: 'Take Bus 15 to Eastside', duration: baseRoute.duration * 0.6, stopName: 'Eastside Heights' }
-        ]
+    return () => {
+      if (homeDebounceRef.current) {
+        window.clearTimeout(homeDebounceRef.current);
       }
-    ];
-  };
-
-  // --- Random/Longest Path Logic ---
-  const fetchSpecialRoute = async (start: [number, number], end: [number, number], type: 'random' | 'longest') => {
-    const latDiff = end[0] - start[0];
-    const lonDiff = end[1] - start[1];
-    const dist = Math.sqrt(latDiff * latDiff + lonDiff * lonDiff);
-    
-    let waypoints: [number, number][] = [start];
-    
-    if (type === 'random') {
-      // Pick 3 random points in a wider bounding box to ensure non-optimality
-      for (let i = 0; i < 3; i++) {
-        const randLat = start[0] + Math.random() * latDiff + (Math.random() - 0.5) * dist;
-        const randLon = start[1] + Math.random() * lonDiff + (Math.random() - 0.5) * dist;
-        waypoints.push([randLat, randLon]);
+      if (workDebounceRef.current) {
+        window.clearTimeout(workDebounceRef.current);
       }
-    } else {
-      // Pick points far away in perpendicular directions to force a massive detour
-      // Calculate perpendicular vector
-      const perpLat = -lonDiff;
-      const perpLon = latDiff;
-      
-      const detour1: [number, number] = [
-        start[0] + latDiff * 0.5 + perpLat * 1.5,
-        start[1] + lonDiff * 0.5 + perpLon * 1.5
-      ];
-      
-      const detour2: [number, number] = [
-        start[0] + latDiff * 0.5 - perpLat * 1.5,
-        start[1] + lonDiff * 0.5 - perpLon * 1.5
-      ];
-      
-      waypoints.push(detour1);
-      waypoints.push(detour2);
+    };
+  }, []);
+
+  const queueSuggestions = (
+    query: string,
+    type: 'home' | 'work',
+    setSuggestions: (items: Suggestion[]) => void,
+  ) => {
+    const debounceRef = type === 'home' ? homeDebounceRef : workDebounceRef;
+
+    if (debounceRef.current) {
+      window.clearTimeout(debounceRef.current);
     }
-    
-    waypoints.push(end);
-    
-    const waypointStr = waypoints.map(w => `${w[1]},${w[0]}`).join(';');
-    const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${waypointStr}?overview=full&geometries=geojson`);
-    const data = await response.json();
-    return data;
-  };
 
-  const fetchRoute = async (start: [number, number], end: [number, number], selectedMode: string, selectedRouteType: string) => {
-    try {
-      setTransitOptions([]);
-      setSelectedTransitId(null);
-
-      if (selectedMode === 'bus') {
-        const options = await simulateTransitOptions(start, end);
-        setTransitOptions(options);
-        if (options.length > 0) {
-          // Prioritize the one with more transfers but less time (simulated)
-          const priority = options.find(o => o.id === 'multi-transfer') || options[0];
-          setSelectedTransitId(priority.id);
-          setRoute(priority.route);
-          setDistance(priority.distance);
-          setDuration(priority.duration);
-          
-          // Update destination to match the bus route's end
-          setWorkAddress(priority.destinationName);
-          setWorkCoords(priority.destinationCoords);
-        }
-        return;
-      }
-
-      let data;
-      if (selectedRouteType === 'random') {
-        data = await fetchSpecialRoute(start, end, 'random');
-      } else if (selectedRouteType === 'longest') {
-        data = await fetchSpecialRoute(start, end, 'longest');
-      } else {
-        const osrmMode = selectedMode === 'cycling' ? 'bike' : selectedMode === 'walking' ? 'foot' : 'driving';
-        const response = await fetch(`https://router.project-osrm.org/route/v1/${osrmMode}/${start[1]},${start[0]};${end[1]},${end[0]}?overview=full&geometries=geojson&alternatives=true`);
-        data = await response.json();
-      }
-      
-      if (data.code === 'Ok' && data.routes.length > 0) {
-        let routeIndex = 0;
-        if (selectedRouteType === 'unconventional' && data.routes.length > 1) {
-          routeIndex = data.routes.length - 1;
-        }
-
-        const routeData = data.routes[routeIndex];
-        const coordinates = routeData.geometry.coordinates.map((coord: [number, number]) => [coord[1], coord[0]] as [number, number]);
-        setRoute(coordinates);
-        setDistance(routeData.distance);
-        setDuration(routeData.duration);
-
-        if (selectedRouteType === 'unconventional' && data.routes.length === 1) {
-          setError("No unconventional route found. Showing the optimal route instead.");
-        }
-      } else {
-        setError("Could not find a route between these locations.");
-      }
-    } catch (err) {
-      console.error("Routing error:", err);
-      setError("Error fetching route. Please try again.");
-    }
-  };
-
-  const handleFindRoute = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!homeAddress || !workAddress) {
-      setError("Please enter both Home and Work addresses.");
+    if (query.trim().length < 3) {
+      setSuggestions([]);
       return;
     }
-    
-    setLoading(true);
+
+    debounceRef.current = window.setTimeout(async () => {
+      try {
+        const items = await fetchSuggestions(query.trim());
+        setSuggestions(items);
+      } catch {
+        setSuggestions([]);
+      }
+    }, 250);
+  };
+
+  const selectSuggestion = (suggestion: Suggestion, type: 'home' | 'work') => {
+    const coords = [Number(suggestion.lat), Number(suggestion.lon)] as Coordinates;
+
+    if (type === 'home') {
+      setHomeAddress(suggestion.display_name);
+      setHomeCoords(coords);
+      setHomeSuggestions([]);
+      setShowHomeSuggestions(false);
+      return;
+    }
+
+    setWorkAddress(suggestion.display_name);
+    setWorkCoords(coords);
+    setWorkSuggestions([]);
+    setShowWorkSuggestions(false);
+  };
+
+  const resetResults = () => {
     setError(null);
-    setRoute(null);
-    setDistance(null);
-    setDuration(null);
-    
-    const home = await geocode(homeAddress);
-    if (!home) {
-      setError("Could not find the Home address.");
-      setLoading(false);
-      return;
-    }
-    
-    const work = await geocode(workAddress);
-    if (!work) {
-      setError("Could not find the Work address.");
-      setLoading(false);
-      return;
-    }
-    
-    setHomeCoords(home);
-    setWorkCoords(work);
-    
-    await fetchRoute(home, work, mode, routeType);
-    setLoading(false);
+    setActiveRoute(null);
+    setBusOptions([]);
+    setSelectedBusId(null);
   };
 
-  const formatDistance = (meters: number) => {
-    const miles = meters * 0.000621371;
-    return `${miles.toFixed(1)} mi`;
-  };
-  
-  const formatDuration = (seconds: number) => {
-    const minutes = Math.round(seconds / 60);
-    if (minutes >= 60) {
-      const hours = Math.floor(minutes / 60);
-      const mins = minutes % 60;
-      return `${hours} hr ${mins} min`;
+  const resolveCoordinates = async () => {
+    const resolvedHome =
+      homeCoords && homeAddress.trim()
+        ? { coords: homeCoords, label: homeAddress.trim() }
+        : await geocodeAddress(homeAddress.trim());
+    const resolvedWork =
+      workCoords && workAddress.trim()
+        ? { coords: workCoords, label: workAddress.trim() }
+        : await geocodeAddress(workAddress.trim());
+
+    if (!resolvedHome) {
+      throw new Error('Home address could not be found.');
     }
-    return `${minutes} min`;
+
+    if (!resolvedWork) {
+      throw new Error('Work address could not be found.');
+    }
+
+    setHomeAddress(resolvedHome.label);
+    setWorkAddress(resolvedWork.label);
+    setHomeCoords(resolvedHome.coords);
+    setWorkCoords(resolvedWork.coords);
+
+    return {
+      start: resolvedHome.coords,
+      end: resolvedWork.coords,
+    };
   };
+
+  const handleFindRoute = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!homeAddress.trim() || !workAddress.trim()) {
+      setError('Enter both a home and work address before calculating a route.');
+      return;
+    }
+
+    setLoading(true);
+    resetResults();
+
+    try {
+      const { start, end } = await resolveCoordinates();
+
+      if (mode === 'bus') {
+        const options = await buildBusOptions(start, end);
+        const recommended = options.find((option) => option.recommended) ?? options[0];
+        setBusOptions(options);
+        setSelectedBusId(recommended.id);
+        setActiveRoute({
+          distance: recommended.distance,
+          duration: recommended.duration,
+          geometry: recommended.geometry,
+          label: `${recommended.name} recommended`,
+        });
+      } else {
+        const route = await buildStandardRoute(start, end, mode, plan);
+        setActiveRoute(route);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to calculate the requested route.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const selectedBus = busOptions.find((option) => option.id === selectedBusId) ?? null;
+  const currentGeometry = selectedBus ? selectedBus.geometry : activeRoute?.geometry ?? [];
+  const summaryDistance = selectedBus ? selectedBus.distance : activeRoute?.distance ?? null;
+  const summaryDuration = selectedBus ? selectedBus.duration : activeRoute?.duration ?? null;
+  const showRouletteOverlay = loading && mode !== 'bus' && plan === 'random';
 
   return (
-    <div className="flex flex-col md:flex-row h-screen w-full bg-slate-50 font-sans">
-      {/* Sidebar */}
-      <div className="w-full md:w-96 bg-white shadow-xl z-10 flex flex-col h-auto md:h-full overflow-y-auto">
-        <div className="p-6 bg-indigo-600 text-white">
-          <div className="flex items-center gap-2 mb-2">
-            <Navigation className="w-6 h-6" />
-            <h1 className="text-2xl font-bold tracking-tight">Commuter Hero</h1>
+    <div className="h-screen w-full bg-slate-100 text-slate-900">
+      {showRouletteOverlay && (
+        <div className="pointer-events-none fixed inset-0 z-[2000] flex items-center justify-center bg-slate-950/45 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-6">
+            <RouletteWheel active={showRouletteOverlay} />
+            <div className="rounded-full bg-white/10 px-5 py-2 text-center text-sm font-semibold uppercase tracking-[0.28em] text-white shadow-lg">
+              Spinning up a wild route...
+            </div>
           </div>
-          <p className="text-indigo-100 text-sm">Find your optimal daily route</p>
         </div>
+      )}
 
-        <div className="p-6 flex-grow">
-          <form onSubmit={handleFindRoute} className="space-y-6">
-            <div className="space-y-4">
-              <div className="relative">
-                <label htmlFor="home" className="block text-sm font-medium text-slate-700 mb-1">Home Address</label>
+      <div className="flex h-full flex-col md:flex-row">
+        <aside className="z-[1000] flex w-full flex-col overflow-y-auto border-b border-slate-200 bg-white shadow-2xl md:h-full md:w-[420px] md:border-b-0 md:border-r">
+          <div className="bg-[linear-gradient(135deg,#0f172a_0%,#0f3d54_52%,#129990_100%)] px-6 py-6 text-white">
+            <div className="flex items-center gap-3">
+              <div className="rounded-2xl bg-white/12 p-3 backdrop-blur">
+                <Navigation className="h-6 w-6" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-semibold tracking-tight">Commuter Hero</h1>
+                <p className="text-sm text-cyan-50/90">
+                  Daily commute planning with smart routing, bus options, and detour modes.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1 space-y-6 p-6">
+            <form className="space-y-6" onSubmit={handleFindRoute}>
+              <div className="space-y-4">
                 <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                    <Home className="h-5 w-5 text-blue-500" />
-                  </div>
-                  <input
-                    type="text"
-                    id="home"
-                    value={homeAddress}
-                    onChange={(e) => {
-                      setHomeAddress(e.target.value);
-                      setShowHomeSuggestions(true);
-                    }}
-                    onFocus={() => setShowHomeSuggestions(true)}
-                    className="block w-full pl-10 pr-10 py-2 border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                    placeholder="e.g. 123 Main St, San Francisco"
-                  />
-                  {homeAddress && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHomeAddress('');
+                  <label htmlFor="home" className="mb-1.5 block text-sm font-medium text-slate-700">
+                    Home address
+                  </label>
+                  <div className="relative">
+                    <Home className="pointer-events-none absolute left-3 top-3.5 h-5 w-5 text-blue-600" />
+                    <input
+                      id="home"
+                      value={homeAddress}
+                      onChange={(event) => {
+                        setHomeAddress(event.target.value);
                         setHomeCoords(null);
-                        setHomeSuggestions([]);
+                        setShowHomeSuggestions(true);
+                        queueSuggestions(event.target.value, 'home', setHomeSuggestions);
                       }}
-                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"
-                    >
-                      <X size={16} />
-                    </button>
+                      onFocus={() => setShowHomeSuggestions(true)}
+                      onBlur={() => window.setTimeout(() => setShowHomeSuggestions(false), 120)}
+                      className="w-full rounded-2xl border border-slate-300 bg-white py-3 pl-11 pr-4 text-sm shadow-sm outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+                      placeholder="Enter your starting point"
+                    />
+                  </div>
+
+                  {showHomeSuggestions && homeSuggestions.length > 0 && (
+                    <div className="absolute z-[1200] mt-2 max-h-64 w-full overflow-auto rounded-2xl border border-slate-200 bg-white p-1 shadow-xl">
+                      {homeSuggestions.map((suggestion) => (
+                        <button
+                          key={suggestion.place_id}
+                          type="button"
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => selectSuggestion(suggestion, 'home')}
+                          className="block w-full rounded-xl px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+                        >
+                          {suggestion.display_name}
+                        </button>
+                      ))}
+                    </div>
                   )}
-                  <AnimatePresence>
-                    {showHomeSuggestions && homeSuggestions.length > 0 && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -10 }}
-                        className="absolute z-20 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg max-h-60 overflow-auto"
-                      >
-                        {homeSuggestions.map((s) => (
-                          <button
-                            key={s.place_id}
-                            type="button"
-                            className="w-full text-left px-4 py-2 hover:bg-slate-50 text-sm border-b border-slate-100 last:border-0"
-                            onClick={() => {
-                              setHomeAddress(s.display_name);
-                              setHomeCoords([parseFloat(s.lat), parseFloat(s.lon)]);
-                              setShowHomeSuggestions(false);
-                            }}
-                          >
-                            {s.display_name}
-                          </button>
-                        ))}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
+                </div>
+
+                <div className="relative">
+                  <label htmlFor="work" className="mb-1.5 block text-sm font-medium text-slate-700">
+                    Work address
+                  </label>
+                  <div className="relative">
+                    <Briefcase className="pointer-events-none absolute left-3 top-3.5 h-5 w-5 text-rose-600" />
+                    <input
+                      id="work"
+                      value={workAddress}
+                      onChange={(event) => {
+                        setWorkAddress(event.target.value);
+                        setWorkCoords(null);
+                        setShowWorkSuggestions(true);
+                        queueSuggestions(event.target.value, 'work', setWorkSuggestions);
+                      }}
+                      onFocus={() => setShowWorkSuggestions(true)}
+                      onBlur={() => window.setTimeout(() => setShowWorkSuggestions(false), 120)}
+                      className="w-full rounded-2xl border border-slate-300 bg-white py-3 pl-11 pr-4 text-sm shadow-sm outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+                      placeholder="Enter your destination"
+                    />
+                  </div>
+
+                  {showWorkSuggestions && workSuggestions.length > 0 && (
+                    <div className="absolute z-[1200] mt-2 max-h-64 w-full overflow-auto rounded-2xl border border-slate-200 bg-white p-1 shadow-xl">
+                      {workSuggestions.map((suggestion) => (
+                        <button
+                          key={suggestion.place_id}
+                          type="button"
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => selectSuggestion(suggestion, 'work')}
+                          className="block w-full rounded-xl px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+                        >
+                          {suggestion.display_name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="relative">
-                <label htmlFor="work" className="block text-sm font-medium text-slate-700 mb-1">Work Address</label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                    <Briefcase className="h-5 w-5 text-red-500" />
-                  </div>
-                  <input
-                    type="text"
-                    id="work"
-                    value={workAddress}
-                    onChange={(e) => {
-                      setWorkAddress(e.target.value);
-                      setShowWorkSuggestions(true);
-                    }}
-                    onFocus={() => setShowWorkSuggestions(true)}
-                    className="block w-full pl-10 pr-10 py-2 border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                    placeholder="e.g. 456 Market St, San Francisco"
-                  />
-                  {workAddress && (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Commute mode
+                  </h2>
+                  <span className="text-xs text-slate-400">OSM + OSRM</span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    ['driving', 'Drive', Car],
+                    ['walking', 'Walk', Footprints],
+                    ['cycling', 'Bike', Bike],
+                    ['bus', 'Bus', Bus],
+                  ].map(([value, label, Icon]) => (
                     <button
+                      key={value}
+                      type="button"
+                      onClick={() => setMode(value as CommuteMode)}
+                      className={`flex items-center justify-center gap-2 rounded-2xl border px-3 py-3 text-sm font-medium transition ${
+                        mode === value
+                          ? 'border-cyan-600 bg-cyan-50 text-cyan-800'
+                          : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      <Icon className="h-4 w-4" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Route plan
+                  </h2>
+                  <span className="text-xs text-slate-400">
+                    {mode === 'bus' ? 'Bus mode uses route set generation' : 'Choose how adventurous the trip gets'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 gap-2">
+                  {[
+                    ['optimal', 'Optimal', RouteIcon],
+                    ['random', 'Randomizer', Shuffle],
+                    ['longest', 'Longest Path', WandSparkles],
+                  ].map(([value, label, Icon]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      disabled={mode === 'bus'}
+                      onClick={() => setPlan(value as RoutePlan)}
+                      className={`flex items-center justify-between rounded-2xl border px-4 py-3 text-left text-sm transition ${
+                        plan === value && mode !== 'bus'
+                          ? 'border-cyan-600 bg-cyan-50 text-cyan-900'
+                          : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                      } ${mode === 'bus' ? 'cursor-not-allowed opacity-50' : ''}`}
+                    >
+                      <span className="flex items-center gap-2 font-medium">
+                        <Icon className="h-4 w-4" />
+                        {label}
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        {value === 'optimal'
+                          ? 'Fastest default'
+                          : value === 'random'
+                            ? 'Any valid detour'
+                            : 'Maximum detour'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-900/15 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Navigation className="h-4 w-4" />
+                {loading ? 'Calculating route...' : 'Find Optimal Route'}
+              </button>
+            </form>
+
+            {error && (
+              <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+                  <p>{error}</p>
+                </div>
+              </div>
+            )}
+
+            {summaryDistance !== null && summaryDuration !== null && (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Trip summary
+                  </h2>
+                  <span className="text-xs text-slate-400">
+                    {selectedBus ? selectedBus.name : activeRoute?.label}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                    <Clock3 className="mb-3 h-5 w-5 text-cyan-700" />
+                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Estimated time</div>
+                    <div className="mt-1 text-2xl font-semibold">{formatDuration(summaryDuration)}</div>
+                  </div>
+
+                  <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                    <RouteIcon className="mb-3 h-5 w-5 text-cyan-700" />
+                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Distance</div>
+                    <div className="mt-1 text-2xl font-semibold">{formatDistance(summaryDistance)}</div>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {mode === 'bus' && busOptions.length > 0 && (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Bus routes
+                  </h2>
+                  <span className="text-xs text-slate-400">MVP route-set estimates</span>
+                </div>
+
+                <div className="space-y-3">
+                  {busOptions.map((option) => (
+                    <button
+                      key={option.id}
                       type="button"
                       onClick={() => {
-                        setWorkAddress('');
-                        setWorkCoords(null);
-                        setWorkSuggestions([]);
+                        setSelectedBusId(option.id);
+                        setActiveRoute({
+                          distance: option.distance,
+                          duration: option.duration,
+                          geometry: option.geometry,
+                          label: option.name,
+                        });
                       }}
-                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"
+                      className={`w-full rounded-3xl border p-4 text-left transition ${
+                        selectedBusId === option.id
+                          ? 'border-cyan-600 bg-cyan-50 shadow-lg shadow-cyan-100'
+                          : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+                      }`}
                     >
-                      <X size={16} />
-                    </button>
-                  )}
-                  <AnimatePresence>
-                    {showWorkSuggestions && workSuggestions.length > 0 && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -10 }}
-                        className="absolute z-20 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg max-h-60 overflow-auto"
-                      >
-                        {workSuggestions.map((s) => (
-                          <button
-                            key={s.place_id}
-                            type="button"
-                            className="w-full text-left px-4 py-2 hover:bg-slate-50 text-sm border-b border-slate-100 last:border-0"
-                            onClick={() => {
-                              setWorkAddress(s.display_name);
-                              setWorkCoords([parseFloat(s.lat), parseFloat(s.lon)]);
-                              setShowWorkSuggestions(false);
-                            }}
-                          >
-                            {s.display_name}
-                          </button>
-                        ))}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-slate-700">Commute Mode</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button type="button" onClick={() => setMode('driving')} className={`py-2 px-3 rounded-md flex items-center justify-center gap-2 border text-sm transition-colors ${mode === 'driving' ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-                    <Car size={16}/> Drive
-                  </button>
-                  <button type="button" onClick={() => setMode('bus')} className={`py-2 px-3 rounded-md flex items-center justify-center gap-2 border text-sm transition-colors ${mode === 'bus' ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-                    <Bus size={16}/> Bus
-                  </button>
-                  <button type="button" onClick={() => setMode('cycling')} className={`py-2 px-3 rounded-md flex items-center justify-center gap-2 border text-sm transition-colors ${mode === 'cycling' ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-                    <Bike size={16}/> Bike
-                  </button>
-                  <button type="button" onClick={() => setMode('walking')} className={`py-2 px-3 rounded-md flex items-center justify-center gap-2 border text-sm transition-colors ${mode === 'walking' ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-                    <Footprints size={16}/> Walk
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-slate-700">Route Type</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button type="button" onClick={() => setRouteType('optimal')} className={`py-2 px-3 rounded-md flex items-center justify-center gap-2 border text-sm transition-colors ${routeType === 'optimal' ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-                    Optimal
-                  </button>
-                  <button type="button" onClick={() => setRouteType('unconventional')} className={`py-2 px-3 rounded-md flex items-center justify-center gap-2 border text-sm transition-colors ${routeType === 'unconventional' ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-                    Unconventional
-                  </button>
-                  <button type="button" onClick={() => setRouteType('random')} className={`py-2 px-3 rounded-md flex items-center justify-center gap-2 border text-sm transition-colors ${routeType === 'random' ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-                    <Shuffle size={14}/> Random
-                  </button>
-                  <button type="button" onClick={() => setRouteType('longest')} className={`py-2 px-3 rounded-md flex items-center justify-center gap-2 border text-sm transition-colors ${routeType === 'longest' ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-                    <Maximize size={14}/> Longest
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {loading ? (
-                <span className="flex items-center gap-2">
-                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  Calculating Route...
-                </span>
-              ) : (
-                <span className="flex items-center gap-2">
-                  <Search className="w-4 h-4" />
-                  {routeType === 'unconventional' ? 'Find Unconventional Route' : 'Find Optimal Route'}
-                </span>
-              )}
-            </button>
-          </form>
-
-          {error && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2 text-red-700">
-              <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-              <p className="text-sm">{error}</p>
-            </div>
-          )}
-
-          {transitOptions.length > 0 && (
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="mt-8 space-y-4"
-            >
-              <h2 className="text-lg font-semibold text-slate-800 border-b pb-2">Bus Routes</h2>
-              <div className="space-y-3">
-                {transitOptions.map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedTransitId(opt.id);
-                      setRoute(opt.route);
-                      setDistance(opt.distance);
-                      setDuration(opt.duration);
-                      setWorkAddress(opt.destinationName);
-                      setWorkCoords(opt.destinationCoords);
-                    }}
-                    className={`w-full text-left p-4 rounded-xl border transition-all relative overflow-hidden ${selectedTransitId === opt.id ? 'bg-indigo-50 border-indigo-300 ring-1 ring-indigo-300' : 'bg-white border-slate-200 hover:border-slate-300'}`}
-                  >
-                    {opt.id === 'multi-transfer' && (
-                      <div className="absolute top-0 right-0 bg-emerald-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-bl-lg flex items-center gap-1">
-                        <Star size={10} fill="currentColor" /> RECOMMENDED
-                      </div>
-                    )}
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="font-bold text-slate-900">{opt.name}</span>
-                      <span className="text-indigo-600 font-bold">{formatDuration(opt.duration)}</span>
-                    </div>
-                    <p className="text-xs text-slate-500 mb-2">{opt.description}</p>
-                    <div className="flex gap-3 text-[10px] uppercase font-bold tracking-wider text-slate-400">
-                      <span className="flex items-center gap-1"><Shuffle size={10}/> {opt.transfers} Transfers</span>
-                      <span className="flex items-center gap-1"><MapPin size={10}/> {opt.stops} Stops</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </motion.div>
-          )}
-
-          {route && distance !== null && duration !== null && (
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="mt-8 space-y-4"
-            >
-              <h2 className="text-lg font-semibold text-slate-800 border-b pb-2">Trip Summary</h2>
-              
-              <div className="grid grid-cols-2 gap-4">
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col items-center justify-center text-center">
-                  <Clock className="w-6 h-6 text-indigo-500 mb-2" />
-                  <span className="text-xs text-slate-500 uppercase font-semibold tracking-wider">Est. Time</span>
-                  <span className="text-xl font-bold text-slate-800">{formatDuration(duration)}</span>
-                </div>
-                
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col items-center justify-center text-center">
-                  <RouteIcon className="w-6 h-6 text-indigo-500 mb-2" />
-                  <span className="text-xs text-slate-500 uppercase font-semibold tracking-wider">Distance</span>
-                  <span className="text-xl font-bold text-slate-800">{formatDistance(distance)}</span>
-                </div>
-              </div>
-
-              {mode === 'bus' && selectedTransitId && (
-                <div className="mt-6 space-y-4">
-                  <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest">Itinerary</h3>
-                  <div className="relative pl-6 space-y-6 before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-200">
-                    {transitOptions.find(o => o.id === selectedTransitId)?.legs.map((leg, idx) => (
-                      <div key={idx} className="relative">
-                        <div className={`absolute -left-[21px] top-1 w-3 h-3 rounded-full border-2 border-white shadow-sm ${leg.type === 'bus' ? 'bg-indigo-500' : 'bg-slate-400'}`} />
-                        <div className="flex flex-col">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
                           <div className="flex items-center gap-2">
-                            <span className="text-sm font-bold text-slate-800">
-                              {leg.type === 'bus' ? `Bus ${leg.line}` : 'Walk'}
-                            </span>
-                            <span className="text-[10px] text-slate-400 font-mono">{formatDuration(leg.duration)}</span>
+                            <span className="font-semibold text-slate-900">{option.name}</span>
+                            {option.recommended && (
+                              <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-700">
+                                Recommended
+                              </span>
+                            )}
                           </div>
-                          <p className="text-xs text-slate-500">{leg.instruction}</p>
-                          {leg.stopName && (
-                            <div className="mt-1 flex items-center gap-1 text-[10px] font-bold text-indigo-600">
-                              <MapPin size={10} /> {leg.stopName}
-                            </div>
-                          )}
+                          <p className="mt-1 text-sm text-slate-600">{option.description}</p>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-semibold text-slate-900">{formatDuration(option.duration)}</div>
+                          <div className="text-xs text-slate-400">{formatDistance(option.distance)}</div>
                         </div>
                       </div>
-                    ))}
-                    <div className="relative">
-                      <div className="absolute -left-[21px] top-1 w-3 h-3 rounded-full border-2 border-white shadow-sm bg-red-500" />
-                      <div className="flex flex-col">
-                        <span className="text-sm font-bold text-slate-800">Destination Reached</span>
-                        <p className="text-xs text-slate-500">{workAddress}</p>
+
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-200">
+                          {option.transfers} transfers
+                        </span>
+                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-200">
+                          {option.stops} stops
+                        </span>
                       </div>
+                    </button>
+                  ))}
+                </div>
+
+                {selectedBus && (
+                  <div className="rounded-3xl border border-slate-200 bg-white p-4">
+                    <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                      <Trophy className="h-4 w-4" />
+                      Bus itinerary
+                    </div>
+                    <div className="space-y-3">
+                      {selectedBus.legs.map((leg, index) => (
+                        <div key={`${leg.title}-${index}`} className="rounded-2xl bg-slate-50 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="font-medium text-slate-900">{leg.title}</span>
+                            <span className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                              {formatDuration(leg.duration)}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-sm text-slate-600">{leg.detail}</p>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </div>
-      </div>
+                )}
+              </section>
+            )}
+          </div>
+        </aside>
 
-      {/* Map Area */}
-      <div className="flex-grow h-[50vh] md:h-full relative z-0">
-        <MapContainer 
-          center={defaultCenter} 
-          zoom={13} 
-          className="w-full h-full"
-          zoomControl={false}
-        >
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-          
-          {homeCoords && (
-            <Marker position={homeCoords} icon={homeIcon}>
-              <Popup>
-                <div className="font-semibold">Home</div>
-                <div className="text-xs text-slate-500">{homeAddress}</div>
-              </Popup>
-            </Marker>
-          )}
-          
-          {workCoords && (
-            <Marker position={workCoords} icon={workIcon}>
-              <Popup>
-                <div className="font-semibold">Work</div>
-                <div className="text-xs text-slate-500">{workAddress}</div>
-              </Popup>
-            </Marker>
-          )}
-          
-          {route && (
-            <Polyline 
-              positions={route} 
-              color="#4f46e5" 
-              weight={5} 
-              opacity={0.8}
-              lineCap="round"
-              lineJoin="round"
+        <main className="relative h-[48vh] flex-1 md:h-full">
+          <MapContainer center={DEFAULT_CENTER} zoom={12} className="h-full w-full" zoomControl={false}>
+            <TileLayer
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
-          )}
-          
-          <MapUpdater homeCoords={homeCoords} workCoords={workCoords} route={route} />
-        </MapContainer>
+
+            {homeCoords && (
+              <Marker position={homeCoords} icon={homeIcon}>
+                <Popup>
+                  <div className="space-y-1">
+                    <div className="font-semibold">Home</div>
+                    <div className="text-xs text-slate-600">{homeAddress}</div>
+                  </div>
+                </Popup>
+              </Marker>
+            )}
+
+            {workCoords && (
+              <Marker position={workCoords} icon={workIcon}>
+                <Popup>
+                  <div className="space-y-1">
+                    <div className="font-semibold">Work</div>
+                    <div className="text-xs text-slate-600">{workAddress}</div>
+                  </div>
+                </Popup>
+              </Marker>
+            )}
+
+            {currentGeometry.length > 0 && (
+              <Polyline
+                positions={currentGeometry}
+                pathOptions={{
+                  color: mode === 'bus' ? '#0f766e' : '#0284c7',
+                  weight: 6,
+                  opacity: 0.88,
+                }}
+              />
+            )}
+
+            <MapViewport route={currentGeometry} homeCoords={homeCoords} workCoords={workCoords} />
+          </MapContainer>
+        </main>
       </div>
     </div>
   );
